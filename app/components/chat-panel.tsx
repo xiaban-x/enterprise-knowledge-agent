@@ -67,13 +67,18 @@ export function ChatPanel() {
     setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
     try {
+      // Build conversation history from previous messages (exclude current)
+      const history = messages
+        .filter(m => m.content)
+        .map(m => ({ role: m.role, content: m.content }));
+
       const res = await fetch("/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "pages-agent-conversation-id": conversationId,
         },
-        body: JSON.stringify({ message: userMessage }),
+        body: JSON.stringify({ message: userMessage, history }),
       });
 
       if (!res.ok) {

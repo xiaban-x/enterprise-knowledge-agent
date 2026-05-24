@@ -42,6 +42,11 @@ const logger = createLogger("chat");
 
 const GraphState = Annotation.Root({
   question: Annotation<string>(),
+  // Conversation history for multi-turn context
+  chatHistory: Annotation<Array<{ role: string; content: string }>>({
+    reducer: (_, n) => n,
+    default: () => [],
+  }),
   // Agent decision
   action: Annotation<"search" | "clarify" | "no_docs" | "direct_answer">({
     reducer: (_, n) => n,
@@ -88,15 +93,23 @@ async function agentDecide(state: typeof GraphState.State) {
     .map((s) => `- "${s.filename}": ${s.summary.slice(0, 100)}`)
     .join("\n");
 
+  // Build conversation context for multi-turn understanding
+  const historyText = state.chatHistory.length > 0
+    ? `\n\nRecent conversation:\n${state.chatHistory.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n")}`
+    : "";
+
   const response = await model.invoke([
     new SystemMessage(`You are an intelligent assistant that decides the best action for a user question.
 You have access to a knowledge base with ${summaries.length} documents:
 ${summaryList}
+${historyText}
 
-Based on the user's question, decide ONE action:
+Based on the user's question (considering conversation context if any), decide ONE action:
 1. "search" — The question can likely be answered by searching the documents above
 2. "clarify" — The question is too vague or ambiguous to search effectively. You need more information.
 3. "direct_answer" — The question is general knowledge unrelated to any document (e.g. "hello", "what's 2+2")
+
+IMPORTANT: Consider the conversation history! If the user says something like "yes, that one" or "24" after a previous exchange, interpret it in context.
 
 Output JSON only:
 {"action": "search"|"clarify"|"direct_answer", "reason": "brief explanation"}
@@ -189,13 +202,18 @@ async function router(state: typeof GraphState.State) {
     ? `\nNote: Previous documents didn't provide a good answer. Try selecting DIFFERENT documents this time.`
     : "";
 
+  const historyContext = state.chatHistory.length > 0
+    ? `\n\nConversation context:\n${state.chatHistory.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n")}`
+    : "";
+
   const response = await model.invoke([
     new SystemMessage(`You are a document routing assistant. Given a user question and document summaries, select 1-2 documents most likely to contain the answer.${retryHint}
+${historyContext ? "\nIMPORTANT: Consider the conversation history to understand the user's intent. Resolve pronouns and references." : ""}
 
 Output JSON only:
 {"docIds": ["id1", "id2"], "reason": "why these docs"}
 If NO document is relevant: {"docIds": [], "reason": "explanation"}`),
-    new HumanMessage(`Question: ${state.question}\n\nAvailable documents:\n${summaryText}`),
+    new HumanMessage(`Question: ${state.question}${historyContext}\n\nAvailable documents:\n${summaryText}`),
   ]);
 
   const text = typeof response.content === "string" ? response.content : "";
@@ -257,14 +275,19 @@ async function generateAnswer(state: typeof GraphState.State) {
     };
   }
 
+  const historyContext = state.chatHistory.length > 0
+    ? `\n\nConversation history:\n${state.chatHistory.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n")}`
+    : "";
+
   const response = await model.invoke([
     new SystemMessage(`You are a knowledgeable assistant. Answer the question based on the provided document content.
 Rules:
 - Cite sources by referencing [Source: filename]
 - If the documents don't fully answer the question, say what you can determine and note what's missing
 - Be concise but thorough
-- Use the same language as the question`),
-    new HumanMessage(`Question: ${state.question}\n\nDocument content:\n${state.context}`),
+- Use the same language as the question
+- Consider conversation history to understand context and follow-up questions`),
+    new HumanMessage(`Question: ${state.question}${historyContext}\n\nDocument content:\n${state.context}`),
   ]);
 
   const answer = typeof response.content === "string" ? response.content : "";
@@ -392,6 +415,7 @@ function buildGraph() {
 
 async function* streamRAG(
   userMessage: string,
+  chatHistory: Array<{ role: string; content: string }>,
   context: any,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
@@ -400,7 +424,7 @@ async function* streamRAG(
   yield sseEvent({ type: "status", status: "processing" });
 
   const stream = await app.stream(
-    { question: userMessage },
+    { question: userMessage, chatHistory },
     { signal }
   );
 
@@ -502,7 +526,7 @@ async function* streamRAG(
 export async function onRequest(context: any) {
   const { request } = context;
   const body = request?.body ?? {};
-  const { message } = body;
+  const { message, history } = body;
 
   if (!message) {
     return new Response(JSON.stringify({ error: "Missing message" }), {
@@ -511,7 +535,8 @@ export async function onRequest(context: any) {
     });
   }
 
+  const chatHistory = Array.isArray(history) ? history : [];
   const signal = request?.signal as AbortSignal | undefined;
-  const generator = streamRAG(message, context, signal);
+  const generator = streamRAG(message, chatHistory, context, signal);
   return createSSEResponse(generator, signal);
 }
