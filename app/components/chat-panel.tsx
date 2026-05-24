@@ -4,6 +4,13 @@ import { useState, useRef, useEffect, useMemo, KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+interface TraceStep {
+  node: string;
+  label: string;
+  detail?: string;
+  timestamp: number;
+}
+
 interface Message {
   role: "user" | "assistant";
   content: string;
@@ -11,6 +18,7 @@ interface Message {
   routing?: { targetDocs: string[]; reason: string; totalDocs: number };
   agentAction?: string;
   quality?: { quality: string; retries: number };
+  trace?: TraceStep[];
 }
 
 export function ChatPanel() {
@@ -53,6 +61,7 @@ export function ChatPanel() {
     let routing: Message["routing"] = undefined;
     let agentAction = "";
     let quality: Message["quality"] = undefined;
+    let trace: TraceStep[] = [];
 
     // Immediately show assistant placeholder with loading state
     setMessages(prev => [...prev, { role: "assistant", content: "" }]);
@@ -108,10 +117,16 @@ export function ChatPanel() {
 
               case "agent_action":
                 agentAction = event.action;
+                trace.push({
+                  node: "agent_decide",
+                  label: "Agent Decision (Tool Use)",
+                  detail: `Action: ${event.action}${event.totalDocs > 0 ? ` | ${event.totalDocs} docs in KB` : ""}`,
+                  timestamp: Date.now(),
+                });
                 setMessages(prev => {
                   const copy = [...prev];
                   const last = copy[copy.length - 1];
-                  if (last.role === "assistant") last.agentAction = event.action;
+                  if (last.role === "assistant") { last.agentAction = event.action; last.trace = [...trace]; }
                   return copy;
                 });
                 break;
@@ -122,10 +137,18 @@ export function ChatPanel() {
                   reason: event.reason || "",
                   totalDocs: event.totalDocs || 0,
                 };
+                trace.push({
+                  node: "router",
+                  label: "Summary Routing",
+                  detail: event.targetDocs?.length > 0
+                    ? `Read all summaries → Selected: ${event.targetDocs.join(", ")} | Reason: ${event.reason}`
+                    : `Read all summaries → No relevant docs found`,
+                  timestamp: Date.now(),
+                });
                 setMessages(prev => {
                   const copy = [...prev];
                   const last = copy[copy.length - 1];
-                  if (last.role === "assistant") last.routing = routing;
+                  if (last.role === "assistant") { last.routing = routing; last.trace = [...trace]; }
                   return copy;
                 });
                 break;
@@ -133,15 +156,35 @@ export function ChatPanel() {
               case "docs_loaded":
                 if (event.docs) {
                   sources = event.docs.map((filename: string) => ({ docId: "", filename }));
+                  trace.push({
+                    node: "load_docs_parallel",
+                    label: "On-Demand Document Loading",
+                    detail: `Loaded ${event.docs.length} doc(s) in parallel: ${event.docs.join(", ")} (${((event.chars || 0) / 1000).toFixed(1)}k chars)`,
+                    timestamp: Date.now(),
+                  });
+                  setMessages(prev => {
+                    const copy = [...prev];
+                    const last = copy[copy.length - 1];
+                    if (last.role === "assistant") last.trace = [...trace];
+                    return copy;
+                  });
                 }
                 break;
 
               case "quality_eval":
                 quality = { quality: event.quality, retries: event.retries };
+                trace.push({
+                  node: "evaluate",
+                  label: "Self-Evaluation",
+                  detail: event.quality === "good"
+                    ? "Answer quality: Good ✓"
+                    : `Answer quality: Poor → Retrying with different docs (attempt ${event.retries})`,
+                  timestamp: Date.now(),
+                });
                 setMessages(prev => {
                   const copy = [...prev];
                   const last = copy[copy.length - 1];
-                  if (last.role === "assistant") last.quality = quality;
+                  if (last.role === "assistant") { last.quality = quality; last.trace = [...trace]; }
                   return copy;
                 });
                 break;
@@ -149,12 +192,19 @@ export function ChatPanel() {
               case "ai_response":
                 if (event.content) {
                   assistantContent = event.content;
+                  trace.push({
+                    node: "generate_answer",
+                    label: "Generate Answer",
+                    detail: `Generated ${event.content.length} chars based on loaded documents`,
+                    timestamp: Date.now(),
+                  });
                   setMessages(prev => {
                     const copy = [...prev];
                     const last = copy[copy.length - 1];
                     if (last.role === "assistant") {
                       last.content = assistantContent;
                       last.sources = sources && sources.length > 0 ? [...sources] : undefined;
+                      last.trace = [...trace];
                     }
                     return copy;
                   });
@@ -174,6 +224,7 @@ export function ChatPanel() {
           last.routing = routing;
           last.agentAction = agentAction;
           last.quality = quality;
+          last.trace = trace.length > 0 ? [...trace] : undefined;
         }
         return copy;
       });
@@ -189,6 +240,8 @@ export function ChatPanel() {
       setCurrentStep("");
     }
   }
+
+  const [expandedTraces, setExpandedTraces] = useState<Set<number>>(new Set());
 
   const actionLabels: Record<string, string> = {
     search: "Document Search",
@@ -222,43 +275,48 @@ export function ChatPanel() {
                 ? "bg-[var(--accent)] text-white"
                 : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
             }`}>
-              {/* Agent action badge */}
-              {msg.agentAction && (
-                <div className="mb-2 flex items-center gap-1.5">
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
-                    {actionLabels[msg.agentAction] || msg.agentAction}
-                  </span>
-                </div>
-              )}
-
-              {/* Routing info */}
-              {msg.routing && msg.routing.targetDocs.length > 0 && (
-                <div className="mb-2 pb-2 border-b border-white/10 text-xs">
-                  <div className="flex items-center gap-1 text-blue-400">
-                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              {/* Execution Trace — shows the full agent decision pipeline */}
+              {msg.trace && msg.trace.length > 0 && (
+                <div className="mb-2">
+                  <button
+                    onClick={() => {
+                      setExpandedTraces(prev => {
+                        const next = new Set(prev);
+                        next.has(i) ? next.delete(i) : next.add(i);
+                        return next;
+                      });
+                    }}
+                    className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+                  >
+                    <svg className={`w-3 h-3 transition-transform ${expandedTraces.has(i) ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
-                    <span>
-                      Routed to {msg.routing.targetDocs.length} doc{msg.routing.targetDocs.length > 1 ? "s" : ""}{msg.routing.totalDocs > 0 ? ` of ${msg.routing.totalDocs}` : ""}
-                    </span>
-                  </div>
-                  {msg.routing.reason && (
-                    <p className="text-[var(--text-secondary)] mt-0.5 ml-4">{msg.routing.reason}</p>
-                  )}
-                </div>
-              )}
+                    <span className="font-medium">Agent Trace</span>
+                    <span className="opacity-60">({msg.trace.length} steps)</span>
+                  </button>
 
-              {/* Quality evaluation (retry indicator) */}
-              {msg.quality && msg.quality.retries > 0 && (
-                <div className="mb-2 pb-2 border-b border-white/10 text-xs">
-                  <div className="flex items-center gap-1 text-amber-400">
-                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    <span>
-                      Retried {msg.quality.retries}x (self-evaluation: improved answer)
-                    </span>
-                  </div>
+                  {expandedTraces.has(i) && (
+                    <div className="mt-2 ml-1 border-l-2 border-blue-500/30 pl-3 space-y-2">
+                      {msg.trace.map((step, j) => (
+                        <div key={j} className="text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`w-2 h-2 rounded-full shrink-0 ${
+                              step.node === "agent_decide" ? "bg-purple-400" :
+                              step.node === "router" ? "bg-blue-400" :
+                              step.node === "load_docs_parallel" ? "bg-emerald-400" :
+                              step.node === "generate_answer" ? "bg-cyan-400" :
+                              step.node === "evaluate" ? "bg-amber-400" :
+                              "bg-gray-400"
+                            }`} />
+                            <span className="font-medium text-[var(--text-primary)]">{step.label}</span>
+                          </div>
+                          {step.detail && (
+                            <p className="text-[var(--text-secondary)] ml-3.5 mt-0.5">{step.detail}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
