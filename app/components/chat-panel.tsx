@@ -9,6 +9,8 @@ interface Message {
   content: string;
   sources?: Array<{ docId: string; filename: string }>;
   routing?: { targetDocs: string[]; reason: string; totalDocs: number };
+  agentAction?: string;
+  quality?: { quality: string; retries: number };
 }
 
 export function ChatPanel() {
@@ -23,6 +25,18 @@ export function ChatPanel() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const stepLabels: Record<string, string> = {
+    agent_decide: "Deciding action...",
+    router: "Analyzing summaries...",
+    load_docs_parallel: "Loading documents (parallel)...",
+    generate_answer: "Generating answer...",
+    evaluate: "Evaluating quality...",
+    fallback_reply: "Generating response...",
+    ask_clarification: "Preparing clarification...",
+    direct_answer: "Answering directly...",
+    suggest_upload: "Suggesting documents...",
+  };
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
@@ -36,6 +50,8 @@ export function ChatPanel() {
     let assistantContent = "";
     let sources: Message["sources"] = [];
     let routing: Message["routing"] = undefined;
+    let agentAction = "";
+    let quality: Message["quality"] = undefined;
 
     try {
       const res = await fetch("/chat", {
@@ -62,7 +78,7 @@ export function ChatPanel() {
       let buffer = "";
 
       // Add assistant message placeholder
-      setMessages(prev => [...prev, { role: "assistant", content: "", sources: [], routing: undefined }]);
+      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -81,7 +97,17 @@ export function ChatPanel() {
             const event = JSON.parse(payload);
             switch (event.type) {
               case "node_start":
-                setCurrentStep(event.node === "router" ? "Analyzing summaries..." : event.node === "load_docs" ? "Loading documents..." : "Generating answer...");
+                setCurrentStep(stepLabels[event.node] || `Running ${event.node}...`);
+                break;
+
+              case "agent_action":
+                agentAction = event.action;
+                setMessages(prev => {
+                  const copy = [...prev];
+                  const last = copy[copy.length - 1];
+                  if (last.role === "assistant") last.agentAction = event.action;
+                  return copy;
+                });
                 break;
 
               case "routing":
@@ -104,9 +130,19 @@ export function ChatPanel() {
                 }
                 break;
 
+              case "quality_eval":
+                quality = { quality: event.quality, retries: event.retries };
+                setMessages(prev => {
+                  const copy = [...prev];
+                  const last = copy[copy.length - 1];
+                  if (last.role === "assistant") last.quality = quality;
+                  return copy;
+                });
+                break;
+
               case "ai_response":
                 if (event.content) {
-                  assistantContent += event.content;
+                  assistantContent = event.content;
                   setMessages(prev => {
                     const copy = [...prev];
                     const last = copy[copy.length - 1];
@@ -130,6 +166,8 @@ export function ChatPanel() {
         if (last.role === "assistant") {
           last.sources = sources && sources.length > 0 ? sources : undefined;
           last.routing = routing;
+          last.agentAction = agentAction;
+          last.quality = quality;
         }
         return copy;
       });
@@ -141,6 +179,13 @@ export function ChatPanel() {
     }
   }
 
+  const actionLabels: Record<string, string> = {
+    search: "Document Search",
+    clarify: "Asking Clarification",
+    direct_answer: "Direct Answer",
+    no_docs: "No Documents",
+  };
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Messages */}
@@ -150,8 +195,11 @@ export function ChatPanel() {
             <div className="text-center max-w-md">
               <h3 className="text-lg font-medium mb-2">Ask a question</h3>
               <p className="text-sm text-[var(--text-secondary)]">
-                Upload documents to the knowledge base, then ask questions. The AI will intelligently route to relevant documents on-demand — no vector database needed.
+                Upload documents to the knowledge base, then ask questions. The AI Agent will intelligently route to relevant documents on-demand.
               </p>
+              <div className="mt-4 text-xs text-[var(--text-secondary)] opacity-60 space-y-1">
+                <p>Powered by LangGraph: Conditional routing, parallel loading, self-evaluation with retry</p>
+              </div>
             </div>
           </div>
         )}
@@ -163,20 +211,43 @@ export function ChatPanel() {
                 ? "bg-[var(--accent)] text-white"
                 : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]"
             }`}>
+              {/* Agent action badge */}
+              {msg.agentAction && (
+                <div className="mb-2 flex items-center gap-1.5">
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                    {actionLabels[msg.agentAction] || msg.agentAction}
+                  </span>
+                </div>
+              )}
+
               {/* Routing info */}
-              {msg.routing && (
+              {msg.routing && msg.routing.targetDocs.length > 0 && (
                 <div className="mb-2 pb-2 border-b border-white/10 text-xs">
                   <div className="flex items-center gap-1 text-blue-400">
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                     </svg>
                     <span>
-                      Routed to {msg.routing.targetDocs.length} of {msg.routing.totalDocs} docs
+                      Routed to {msg.routing.targetDocs.length} doc{msg.routing.targetDocs.length > 1 ? "s" : ""}{msg.routing.totalDocs > 0 ? ` of ${msg.routing.totalDocs}` : ""}
                     </span>
                   </div>
                   {msg.routing.reason && (
                     <p className="text-[var(--text-secondary)] mt-0.5 ml-4">{msg.routing.reason}</p>
                   )}
+                </div>
+              )}
+
+              {/* Quality evaluation (retry indicator) */}
+              {msg.quality && msg.quality.retries > 0 && (
+                <div className="mb-2 pb-2 border-b border-white/10 text-xs">
+                  <div className="flex items-center gap-1 text-amber-400">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    <span>
+                      Retried {msg.quality.retries}x (self-evaluation: improved answer)
+                    </span>
+                  </div>
                 </div>
               )}
 
