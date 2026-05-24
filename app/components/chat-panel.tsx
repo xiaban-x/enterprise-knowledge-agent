@@ -46,13 +46,16 @@ export function ChatPanel() {
     setInput("");
     setMessages(prev => [...prev, { role: "user", content: userMessage }]);
     setIsLoading(true);
-    setCurrentStep("");
+    setCurrentStep("Thinking...");
 
     let assistantContent = "";
     let sources: Message["sources"] = [];
     let routing: Message["routing"] = undefined;
     let agentAction = "";
     let quality: Message["quality"] = undefined;
+
+    // Immediately show assistant placeholder with loading state
+    setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
     try {
       const res = await fetch("/chat", {
@@ -67,7 +70,12 @@ export function ChatPanel() {
       if (!res.ok) {
         const err = await res.json();
         assistantContent = `Error: ${err.error}`;
-        setMessages(prev => [...prev, { role: "assistant", content: assistantContent }]);
+        setMessages(prev => {
+          const copy = [...prev];
+          const last = copy[copy.length - 1];
+          if (last.role === "assistant") last.content = assistantContent;
+          return copy;
+        });
         setIsLoading(false);
         return;
       }
@@ -77,9 +85,6 @@ export function ChatPanel() {
 
       const decoder = new TextDecoder();
       let buffer = "";
-
-      // Add assistant message placeholder
-      setMessages(prev => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
         const { done, value } = await reader.read();
@@ -173,7 +178,12 @@ export function ChatPanel() {
         return copy;
       });
     } catch (e) {
-      setMessages(prev => [...prev, { role: "assistant", content: `Network error: ${(e as Error).message}` }]);
+      setMessages(prev => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last.role === "assistant") last.content = `Network error: ${(e as Error).message}`;
+        return copy;
+      });
     } finally {
       setIsLoading(false);
       setCurrentStep("");
