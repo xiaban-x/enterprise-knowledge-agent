@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -18,6 +18,7 @@ export function ChatPanel() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [currentStep, setCurrentStep] = useState("");
+  const isComposingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const conversationId = useMemo(() => `rag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, []);
 
@@ -285,6 +286,14 @@ export function ChatPanel() {
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
+            onCompositionStart={() => { isComposingRef.current = true; }}
+            onCompositionEnd={() => { isComposingRef.current = false; }}
+            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === "Enter" && !e.shiftKey && !isComposingRef.current) {
+                e.preventDefault();
+                handleSubmit(e as any);
+              }
+            }}
             placeholder="Ask a question about your documents..."
             disabled={isLoading}
             className="flex-1 bg-[var(--bg-tertiary)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] border border-[var(--border)] rounded-lg px-4 py-2.5 outline-none focus:border-[var(--accent)]"
